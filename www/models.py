@@ -13,6 +13,7 @@ def next_id():
     return '%015d%s000' % (int(time.time() * 1000), uuid.uuid4().hex)
 	
 #有了ORM，我们就可以把Web App需要的3个表用Model表示出来：
+
 class User(Model):
     __table__ = 'users'
 	

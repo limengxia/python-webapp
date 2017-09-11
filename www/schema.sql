@@ -1,13 +1,13 @@
 -- schema.sql
 
-drop database if exists awesome;--如果存在awesome删掉？
+drop database if exists awesome;
 
-create database awesome;--创建数据库awesome
+create database awesome;
 
-use awesome;--使用awesome
+use awesome;
 
-grant select, insert, update, delete on awesome.* to 'www-data'@'localhost' identified by 'www-data';--允许在awesome使用这些命令
---创建table 属性 类型
+grant select, insert, update, delete on awesome.* to 'www-data'@'localhost' identified by 'www-data';
+
 create table users (
     `id` varchar(50) not null,
     `email` varchar(50) not null,

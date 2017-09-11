@@ -1,0 +1,14 @@
+<!'__template__'指定的模板文件是test.html，其他参数是传递给模板的数据，所以我们在模板的根目录templates下创建test.html：>
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Test users - Awesome Python Webapp</title>
+</head>
+<body>
+    <h1>All users</h1>
+    {% for u in users %}
+    <p>{{ u.name }} / {{ u.email }}</p>
+    {% endfor %}
+</body>
+</html>

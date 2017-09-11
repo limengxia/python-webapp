@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+#ORM（Object-Relational Mapping），作用是：把关系数据库的表结构 映射到对象上。 
+
 __author__ = 'limengxia'
 
+
+'''
+在协程中，不能调用普通的同步IO操作，因为所有用户都是由一个线程服务的，
+协程的执行速度必须非常快，才能处理大量用户的请求。
+而耗时的IO操作不能在协程中以同步的方式调用，否则，等待一个IO操作时，系统无法响应任何其他用户。 
+这就是异步编程的一个原则：一旦决定使用异步，则系统每一层都必须是异步。
+'''
 import asyncio, logging
-import aiomysql
+import aiomysql #aiomysql为mysql数据库提供了异步IO的驱动。建立一个web访问的ORM，使每一个web请求被连接之后都要接入数据库进行操作。
 
 def log(sql, args=()):
     logging.info('SQL: %s' % sql)
@@ -14,62 +23,65 @@ def log(sql, args=()):
 
 #我们需要创建一个全局的连接池，每个HTTP请求都可以从连接池中直接获取数据库连接。使用连接池的好处是不必频繁地打开和关闭数据库连接，而是能复用就尽量复用。
 #连接池由全局变量__pool存储，缺省情况下将编码设置为utf8，自动提交事务：
-@asyncio.coroutine 
-def create_pool(loop, **kw):#字典传值
-    logging.info('create database connection pool...')
-    global __pool #创建连接池，类似conn
-    __pool = yield from aiomysql.create_pool( #aiomysql为MySQL数据库提供了异步IO的驱动。
-	    # **kw参数可以包含所有连接需要用到的关键字参数
-        # 默认本机IP
-        host=kw.get('host', 'localhost'),#和前面的SQLAlchemy用一个字符串表示连接信息类比下：'数据库类型+数据库驱动名称://用户名:口令@机器地址:端口号/数据库名'
+#创建连接池,每个http请求都从连接池连接到数据库
+async def create_pool(loop, **kw):#字典传值#charset参数是utf8# **kw参数可以包含所有连接需要用到的关键字参数
+    logging.info('create database connection pool...')#和前面的SQLAlchemy用一个字符串表示连接信息类比下：'数据库类型+数据库驱动名称://用户名:口令@机器地址:端口号/数据库名'
+    global __pool
+    __pool = await aiomysql.create_pool(#aiomysql为MySQL数据库提供了异步IO的驱动。
+        host=kw.get('host', 'localhost'),   # 默认本机IP
         port=kw.get('port', 3306),
         user=kw['user'],
         password=kw['password'],
         db=kw['db'],
-        charset=kw.get('charset', 'utf8'), 
+        charset=kw.get('charset', 'utf8'),
         autocommit=kw.get('autocommit', True),#配置自动提交
-        maxsize=kw.get('maxsize', 10),  #？？？？
+        maxsize=kw.get('maxsize', 10),
         minsize=kw.get('minsize', 1),
         loop=loop# 接收一个event_loop实例
-    )
+    )#创建连接所需要的参数
+    
+# 销毁连接池  后加上去的
+async def destory_pool():
+    global __pool
+    if __pool is not None:
+        __pool.close()
+        await __pool.wait_closed()
 
-# 封装SQL_SELECT语句为select函数'select * from user where id = %s', ('1',)
-
-@asyncio.coroutine
-def select(sql, args, size=None):#（SQL语句,SQL参数，请求数据大小）
+        
+# select语句'select * from user where id = %s', ('1',)
+async def select(sql, args, size=None):#（SQL语句,SQL参数，请求数据大小）
     log(sql, args)
-    global __pool#声明全局变量
-    with (yield from __pool) as conn: #把连接池 取出一个连接
-	    #aiomysql.DictCursor游标库里取一个游标？？？
-        cur = yield from conn.cursor(aiomysql.DictCursor)#注意到yield from将调用一个子协程（也就是在一个协程中调用另一个协程）并直接获得子协程的返回结果。
-        #用游标执行aql语句
-        yield from cur.execute(sql.replace('?', '%s'), args or ())#SQL语句的占位符是?，而MySQL的占位符是%s，select()函数在内部自动替换。注意要始终坚持使用带参数的SQL，而不是自己拼接SQL字符串，这样可以防止SQL注入攻击。
-        if size:#如果传入size参数，就通过fetchmany()获取最多指定数量的记录，否则，通过fetchall()获取所有记录。
-            rs = yield from cur.fetchmany(size)
-        else:
-            rs = yield from cur.fetchall()
-        yield from cur.close()
+    global __pool
+    async with __pool.get() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(sql.replace('?', '%s'), args or ())
+            if size:
+                rs = await cur.fetchmany(size)
+            else:
+                rs = await cur.fetchall()
         logging.info('rows returned: %s' % len(rs))
-        return rs  #返回的是结果集
-		
-#封装INSERT、UPDATE、DELETE语句
-#这3种SQL的执行都需要相同的参数，以及返回一个整数表示影响的行数，所以定义一个函数就够了		
-@asyncio.coroutine
-def execute(sql, args):
+        return rs #返回的是结果集,结果集是一个list，每个元素都是一个tuple，对应一行记录。
+        
+'''   
+# 封装SQL_SELECT语句为select函数
+async def select(sql,args,size=None):
     log(sql)
-    with (yield from __pool) as conn:
-        try:
-            cur = yield from conn.cursor()#？？？为啥跟上面不一样，没参数aiomysql.DictCursor？
-            yield from cur.execute(sql.replace('?', '%s'), args)
-            affected = cur.rowcount#返回影响行数
-            yield from cur.close()
-        except BaseException as e:
-            raise  #错误的话抛出异常
-        finally:
-            conn.close()#执行完SQL语句，释放与数据库的连接。
-        return affected#execute()函数和select()函数所不同的是，cursor对象不返回结果集，而是通过rowcount返回结果数。
+    global __pool #引入全局变量
+    with await __pool as conn: #打开pool的方法,或-->async with __pool.get() as conn:
+        cur = await conn.cursor(aiomysql.DictCursor) #创建游标,aiomysql.DictCursor的作用使生成结果是一个dict
+        await cur.execute(sql.replace('?',"%s"),args or ()) #执行sql语句，sql语句的占位符是'?',而Mysql的占位符是'%s'
+        if size:#如果传入size参数，就通过fetchmany()获取最多指定数量的记录，否则，通过fetchall()获取所有记录。
+            rs = await cur.fetchmany(size)
+        else:
+            rs = await cur.fetchall()
+    await cur.close()
+    logging.info('rows returned: %s'%len(rs))
+    return rs
+'''    
 
-'''
+
+# insert,update,deleta语句
+#这3种SQL的执行都需要相同的参数，以及返回一个整数表示影响的行数，所以定义一个函数就够了	
 async def execute(sql, args, autocommit=True):
     log(sql)
     async with __pool.get() as conn:
@@ -85,17 +97,41 @@ async def execute(sql, args, autocommit=True):
             if not autocommit:
                 await conn.rollback()
             raise
+        finally:
+            conn.close()
+        return affected
+        
+'''       
+#封装INSERT、UPDATE、DELETE语句
+@asyncio.coroutine
+def execute(sql, args):
+    log(sql)
+    with (yield from __pool) as conn:
+        try:
+            cur = yield from conn.cursor()
+            yield from cur.execute(sql.replace('?', '%s'), args)
+            affected = cur.rowcount
+            yield from cur.close()
+        except BaseException as e:
+            raise
+        finally:
+            conn.close()
         return affected
 '''
-# 根据参数数量生成SQL占位符'?'列表，		
-def create_args_string(num):#产成num个,?????
+
+#用于输出元类中创建sql_insert语句中的占位符	
+def create_args_string(num):
     L = []
     for n in range(num):
         L.append('?')
     return ', '.join(L)# 以', '为分隔符，将列表合成字符串
 
+    
 #有了基本的select()和execute()函数，我们就可以开始编写一个简单的ORM了。
 #ORM就是把数据库表的行与相应的对象建立关联，互相转换。
+
+
+#在创建User类之前，最好就得先封装数据库表中的每一列的属性（包含名字、类型、是否为表的主键、默认值），以便调用，这里的做法是定义一个Field类来保存每一列的属性。 
 
 # 定义Field类，负责保存（数据库）表的字段名和字段类型
 #以及Field和各种Field子类：
@@ -155,17 +191,18 @@ class ModelMetaclass(type):
     # cls:代表要__init__的类，此参数在实例化时由Python解释器自动提供
     # bases: 代表继承父类的集合
     # atrrs: 类的方法集合
-    def __new__(cls, name, bases, attrs):#（，，,类的属性 也就是table里的name id score之类的了）
-        # 排除Model类本身:封锁对Model的修改
+    def __new__(cls, name, bases, attrs):#当前准备创建的类的对象；类的名字；类继承的父类集合；类的方法集合类的属性,也就是table里的name id score之类的了。
+        # 排除Model类本身的修改
         if name=='Model':
             return type.__new__(cls, name, bases, attrs)
-        # 获取table名称:
+        # 如果没设置__table__属性，tablename就是类的名字
         tableName = attrs.get('__table__', None) or name #拿到table的名字，比如User的user
         logging.info('found model: %s (table: %s)' % (name, tableName))
         # 获取所有的Field和主键名:
-        mappings = dict() #创建字典存放attrs.items()的值
-        fields = []#创建列表放非主键k？？
+        mappings = {} #创建字典存放attrs.items()的值,保存映射关系
+        fields = []#创建列表放非主键属性
         primaryKey = None
+        # 键是列名，值是field子类
         for k, v in attrs.items():#取 attrs的字典
             if isinstance(v, Field):#判断v是不是Field
                 logging.info('  found mapping: %s ==> %s' % (k, v))
@@ -179,7 +216,7 @@ class ModelMetaclass(type):
                 else:
                     fields.append(k)
         if not primaryKey:#如果主键为0
-            raise RuntimeError('Primary key not found.')
+            raise Exception('Primary key not found.')
 		# 从类属性中删除Field属性，实例的属性会遮盖类的同名属性	
         for k in mappings.keys():#name、id、score
             attrs.pop(k)#pop？？？
@@ -219,7 +256,7 @@ users = User.findAll()
 #定义Model。首先要定义的是所有ORM映射的基类Model：模仿sqlalchemy里的Base = declarative_base()
 # Model类的任何子类可以映射为一个数据库表
 # Model类可以看做是对所有数据库表操作的基本定义的映射
-#Model从dict继承，所以具备所有dict的功能，同时又实现了特殊方法__getattr__()和__setattr__()，因此又可以像引用普通字段那样写：>>> user['id']>>> user.id
+# Model从dict继承，所以具备所有dict的功能，同时又实现了特殊方法__getattr__()和__setattr__()，因此又可以像引用普通字段那样写：>>> user['id']>>> user.id
 
 class Model(dict, metaclass=ModelMetaclass):#？？查下元类用法？？
     # 继承了字典，所以可以接受任意属性？ 实例取的是字典的值
@@ -249,8 +286,9 @@ class Model(dict, metaclass=ModelMetaclass):#？？查下元类用法？？
                 logging.debug('using default value for %s: %s' % (key, str(value)))
                 setattr(self, key, value)
         return value
+        
 	#然后，我们往Model类添加class方法，就可以让所有子类调用class方法：	
-	
+	# 类方法的第一个参数是cls,而实例方法的第一个参数是self
     @classmethod
     async def findAll(cls, where=None, args=None, **kw):
         ' find objects by where clause. '
@@ -272,9 +310,10 @@ class Model(dict, metaclass=ModelMetaclass):#？？查下元类用法？？
                 args.append(limit)
             elif isinstance(limit, tuple) and len(limit) == 2:
                 sql.append('?, ?')
-                args.extend(limit)
+                args.extend(limit) # extend 接收一个iterable参数
             else:
                 raise ValueError('Invalid limit value: %s' % str(limit))
+        #调用select函数,返回值是从数据库里查找到的数据结果
         rs = await select(' '.join(sql), args)
         return [cls(**r) for r in rs]
 
@@ -291,44 +330,44 @@ class Model(dict, metaclass=ModelMetaclass):#？？查下元类用法？？
             return None
 		 # rs[0]表示一行数据,是一个字典，而rs是一个列表
         return rs[0]['_num_']
-
+        
     @classmethod
-    @asyncio.coroutine
-    def find(cls, pk):
+    async def find(cls, pk):
         ' find object by primary key. '
-        rs = yield from select('%s where `%s`=?' % (cls.__select__, cls.__primary_key__), [pk], 1)
+        rs = await select('%s where `%s`=?' % (cls.__select__, cls.__primary_key__), [pk], 1)
         if len(rs) == 0:
-            return None
+            return None        
         # 1.将rs[0]转换成关键字参数元组，rs[0]为dict
         # 2.通过<class '__main__.User'>(位置参数元组)，产生一个实例对象
         return cls(**rs[0])
-		
+	
     '''
 	User类现在就可以通过类方法实现主键查找：
     user = yield from User.find('123')
     '''	
-
-    @asyncio.coroutine
-    def save(self):#调用时需要特别注意：user.save()没有任何效果，因为调用save()仅仅是创建了一个协程，并没有执行它。一定要用：yield from user.save()才真正执行了INSERT操作。
+    async def save(self):#调用时需要特别注意：user.save()没有任何效果，因为调用save()仅仅是创建了一个协程，并没有执行它。一定要用：yield from user.save()才真正执行了INSERT操作。
+        # 获取所有value
         args = list(map(self.getValueOrDefault, self.__fields__))
         args.append(self.getValueOrDefault(self.__primary_key__))
-        rows = yield from execute(self.__insert__, args)
+        rows = await execute(self.__insert__, args)
         if rows != 1:
-            logging.warn('failed to insert record: affected rows: %s' % rows)
+            logging.warning('failed to insert record: affected rows: %s' % rows)
     '''
 	这样，就可以把一个User实例存入数据库：
 	user = User(id=123, name='Michael')
 	yield from user.save()
-    '''	
+    '''
+    
     async def update(self):
         args = list(map(self.getValue, self.__fields__))
         args.append(self.getValue(self.__primary_key__))
         rows = await execute(self.__update__, args)
         if rows != 1:
-            logging.warn('failed to update by primary key: affected rows: %s' % rows)
+            logging.warning('failed to update by primary key: affected rows: %s' % rows)
 
     async def remove(self):
         args = [self.getValue(self.__primary_key__)]
         rows = await execute(self.__delete__, args)
         if rows != 1:
-            logging.warn('failed to remove by primary key: affected rows: %s' % rows)
+            logging.warning('failed to remove by primary key: affected rows: %s' % rows)
+
